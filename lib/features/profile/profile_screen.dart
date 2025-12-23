@@ -1,499 +1,425 @@
-// lib/features/profile/profile_screen.dart
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
-import '../../core/auth/auth_service.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-
-import 'package:csv/csv.dart';
-import 'package:file_picker/file_picker.dart';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:share_plus/share_plus.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:tutorial_coach_mark/tutorial_coach_mark.dart';
 
+// Core
+import '../../core/auth/auth_service.dart';
+import '../../core/storage/local_storage.dart';
 import '../../core/storage/profile_storage.dart';
-import 'profile_edit_sheet.dart';
+import '../../core/storage/export_import_service.dart';
+import '../../core/notifiers/theme_notifier.dart';
+import '../../core/services/firestore_service.dart'; // REQUIRED for backend data
 
-typedef ExportCsvCallback = Future<String> Function(); // returns CSV contents
-typedef ImportCsvCallback = Future<bool> Function(String csvContents); // return true if success
-typedef VoidAsyncCallback = Future<void> Function();
+// Models
+import '../../core/models/transaction_model.dart'; // NEW MODEL
+import '../../features/budgets/models/budget_model.dart';
+
+// Screens
+import 'profile_edit_sheet.dart';
+import 'app_update_screen.dart';
+import 'legal_screens.dart';
 
 class ProfileScreen extends StatefulWidget {
-  /// Optional callbacks you can provide:
-  /// - onExportBudgets: produce budgets CSV string
-  /// - onExportExpenses: produce expenses CSV string
-  /// - onImportCsv: parse/import CSV string
-  /// - onSignOut: auth sign out (optional)
-  /// - onOpenSettings: open settings screen (optional)
-  final ExportCsvCallback? onExportBudgets;
-  final ExportCsvCallback? onExportExpenses;
-  final ImportCsvCallback? onImportCsv;
-  final VoidAsyncCallback? onSignOut;
-  final VoidAsyncCallback? onOpenSettings;
-
-  const ProfileScreen({
-    Key? key,
-    this.onExportBudgets,
-    this.onExportExpenses,
-    this.onImportCsv,
-    this.onSignOut,
-    this.onOpenSettings,
-  }) : super(key: key);
+  const ProfileScreen({super.key});
 
   @override
-  State<ProfileScreen> createState() => _userScreenState();
+  State<ProfileScreen> createState() => _ProfileScreenState();
 }
 
-enum ExportChoice { budgets, expenses, both }
-enum DeliveryChoice { download, share }
-
-class _userScreenState extends State<ProfileScreen> {
-
-  User? _authUser;      // Firebase auth user
-  Profile? _profile;   // App profile data
-
-
+class _ProfileScreenState extends State<ProfileScreen> with SingleTickerProviderStateMixin {
+  User? _authUser;
+  Profile? _profile;
+  bool _isGuest = false;
   bool _loading = true;
-  bool _exporting = false;
-  bool _importing = false;
+
+  // Real Stats
+  double _safeToSpend = 0.0;
+  double _monthlySpent = 0.0;
+  int _activeBudgets = 0;
+
+  late AnimationController _animController;
+  final GlobalKey _exportKey = GlobalKey();
 
   @override
   void initState() {
     super.initState();
-    _authUser = AuthService.currentUser;
-    _loadProfile();
-
+    _animController = AnimationController(vsync: this, duration: const Duration(milliseconds: 800));
+    _initData();
+    _checkProfileTutorial();
   }
 
-  Future<void> _loadProfile() async {
+  @override
+  void dispose() {
+    _animController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _checkProfileTutorial() async {
+    await Future.delayed(const Duration(milliseconds: 1000));
+    final seen = await LocalStorage.hasSeenProfileIntro();
+    if (!seen && mounted) {
+      _showProfileTutorial();
+      await LocalStorage.setSeenProfileIntro();
+    }
+  }
+
+  void _showProfileTutorial() {
+    TutorialCoachMark(
+      targets: [
+        TargetFocus(
+          identify: "export_data",
+          keyTarget: _exportKey,
+          shape: ShapeLightFocus.RRect,
+          radius: 12,
+          paddingFocus: 0,
+          contents: [
+            TargetContent(
+              align: ContentAlign.top,
+              builder: (context, controller) => const Padding(
+                padding: EdgeInsets.all(20),
+                child: Text("Backup Data\nExport your data to CSV here.", style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
+              ),
+            ),
+          ],
+        )
+      ],
+      colorShadow: Colors.black,
+      opacityShadow: 0.8,
+      imageFilter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+      textSkip: "GOT IT",
+    ).show(context: context);
+  }
+
+  Future<void> _initData() async {
     setState(() => _loading = true);
-    final p = await Profile.getProfileOrDefault();
-    setState(() {
-      _profile = p;
-      _loading = false;
-    });
-  }
 
-  Uint8List? _imageBytes() {
-    if (_profile == null) return null;
-    if (_profile!.imageBase64.isEmpty) return null;
-    try {
-      return base64Decode(_profile!.imageBase64);
-    } catch (e) {
-      return null;
-    }
-  }
+    _authUser = AuthService.currentUser;
+    _isGuest = await LocalStorage.isGuest();
+    _profile = await Profile.getProfileOrDefault();
 
-  Future<void> _openEditSheet() async {
-    if (_profile == null) return;
-    final res = await showModalBottomSheet<Profile?>(
-      context: context,
-      isScrollControlled: true,
-      builder: (ctx) => ProfileEditSheet(initial: _profile!),
-    );
-    if (res != null) {
-      setState(() => _profile = res);
-    } else {
-      await _loadProfile();
-    }
-  }
+    // 1. Fetch Real Data from Firestore (Solid Backend)
+    // We use .first to get a one-time snapshot of the current data
+    final transactions = await FirestoreService().getTransactionsStream().first;
+    final budgets = await FirestoreService().getBudgetsStream().first;
+    final goalMap = await LocalStorage.getSavingGoal();
 
-  /// fallback builders if callbacks not provided
-  Future<String> _buildFallbackBudgetsCsv() async {
-    final headers = ['id','title','limit','spent','remaining'];
-    final rows = [
-      headers,
-      ['b1','Food','3000','500','2500'],
-      ['b2','Shopping','2000','1000','1000']
-    ];
-    return const ListToCsvConverter().convert(rows);
-  }
-  Future<String> _buildFallbackExpensesCsv() async {
-    final headers = ['id','amount','category','note','date_iso'];
-    final rows = [
-      headers,
-      ['t1','1000','Shopping','Dress','2025-12-11T23:12:00'],
-      ['t2','500','Food','Dinner','2025-12-11T14:47:00']
-    ];
-    return const ListToCsvConverter().convert(rows);
-  }
+    // 2. Calculate Stats (Current Month Only) to match Dashboard
+    final now = DateTime.now();
+    double income = 0;
+    double expense = 0;
 
-  Future<Directory?> _getDownloadsDirectory() async {
-    try {
-      final dirs = await getExternalStorageDirectories(type: StorageDirectory.downloads);
-      if (dirs != null && dirs.isNotEmpty) return dirs.first;
-      return await getTemporaryDirectory();
-    } catch (_) {
-      return await getTemporaryDirectory();
-    }
-  }
-
-  Future<File> _writeStringToDownloads(String fileName, String contents) async {
-    final dir = await _getDownloadsDirectory();
-    final path = '${dir!.path}/$fileName';
-    final file = File(path);
-    await file.writeAsString(contents, flush: true);
-    return file;
-  }
-
-  Future<void> _exportFlow() async {
-    // Step 1: ask what to export
-    final exportChoice = await showDialog<ExportChoice>(
-      context: context,
-      builder: (ctx) => SimpleDialog(
-        title: const Text('Export'),
-        children: [
-          SimpleDialogOption(onPressed: () => Navigator.pop(ctx, ExportChoice.budgets), child: const Text('Budgets')),
-          SimpleDialogOption(onPressed: () => Navigator.pop(ctx, ExportChoice.expenses), child: const Text('Expenses')),
-          SimpleDialogOption(onPressed: () => Navigator.pop(ctx, ExportChoice.both), child: const Text('Both')),
-        ],
-      ),
-    );
-    if (exportChoice == null) return;
-
-    // Step 2: ask delivery method
-    final delivery = await showDialog<DeliveryChoice>(
-      context: context,
-      builder: (ctx) => SimpleDialog(
-        title: const Text('Export to'),
-        children: [
-          SimpleDialogOption(onPressed: () => Navigator.pop(ctx, DeliveryChoice.download), child: const Text('Download (save to Downloads folder)')),
-          SimpleDialogOption(onPressed: () => Navigator.pop(ctx, DeliveryChoice.share), child: const Text('Share (share sheet)')),
-        ],
-      ),
-    );
-    if (delivery == null) return;
-
-    setState(() => _exporting = true);
-    try {
-      final List<XFile> filesToShare = [];
-      if (exportChoice == ExportChoice.budgets || exportChoice == ExportChoice.both) {
-        String budgetsCsv;
-        if (widget.onExportBudgets != null) {
-          budgetsCsv = await widget.onExportBudgets!();
-        } else {
-          budgetsCsv = await _buildFallbackBudgetsCsv();
-        }
-        final fname = 'finflow_budgets_${DateTime.now().toIso8601String().replaceAll(':','-')}.csv';
-        if (delivery == DeliveryChoice.download) {
-          await _writeStringToDownloads(fname, budgetsCsv);
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Saved $fname')));
-        } else {
-          final tmp = await _saveTempFile(fname, budgetsCsv);
-          filesToShare.add(XFile(tmp.path));
-        }
+    for (var t in transactions) {
+      if (t.date.month == now.month && t.date.year == now.year) {
+        if (t.type == TxnType.income) income += t.amount;
+        if (t.type == TxnType.expense) expense += t.amount;
       }
+    }
 
-      if (exportChoice == ExportChoice.expenses || exportChoice == ExportChoice.both) {
-        String expensesCsv;
-        if (widget.onExportExpenses != null) {
-          expensesCsv = await widget.onExportExpenses!();
-        } else {
-          expensesCsv = await _buildFallbackExpensesCsv();
-        }
-        final fname = 'finflow_expenses_${DateTime.now().toIso8601String().replaceAll(':','-')}.csv';
-        if (delivery == DeliveryChoice.download) {
-          await _writeStringToDownloads(fname, expensesCsv);
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Saved $fname')));
-        } else {
-          final tmp = await _saveTempFile(fname, expensesCsv);
-          filesToShare.add(XFile(tmp.path));
-        }
-      }
+    final sGoal = goalMap != null ? (goalMap['amount'] as num).toDouble() : 0.0;
 
-      if (delivery == DeliveryChoice.share && filesToShare.isNotEmpty) {
-        await Share.shareXFiles(filesToShare, text: 'FinFlow export');
-      }
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Export failed: $e')));
-    } finally {
-      setState(() => _exporting = false);
+    // Logic: Safe = Income - Spent - Goal
+    final safe = income - expense - sGoal;
+
+    if (mounted) {
+      setState(() {
+        _monthlySpent = expense;
+        _activeBudgets = budgets.length;
+        _safeToSpend = safe < 0 ? 0 : safe;
+        _loading = false;
+      });
+      _animController.forward();
     }
   }
 
-  Future<File> _saveTempFile(String fileName, String contents) async {
-    final dir = await getTemporaryDirectory();
-    final file = File('${dir.path}/$fileName');
-    await file.writeAsString(contents, flush: true);
-    return file;
-  }
-
-  Future<void> _importCsvFromString(String csvContents) async {
-    setState(() => _importing = true);
-    try {
-      if (widget.onImportCsv != null) {
-        final ok = await widget.onImportCsv!(csvContents);
-        if (ok) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('CSV imported successfully')));
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('CSV import failed')));
-        }
-      } else {
-        // basic validation using csv package
-        try {
-          final rows = const CsvToListConverter().convert(csvContents, eol: '\n');
-          if (rows.isEmpty) {
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('CSV is empty or invalid')));
-          } else {
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('CSV parsed (no import logic).')));
-          }
-        } catch (e) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('CSV parsing failed')));
-        }
-      }
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Import failed: $e')));
-    } finally {
-      setState(() => _importing = false);
-    }
-  }
-
-  Future<void> _pickCsvFileAndImport() async {
-    try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['csv'],
-        withData: true,
-      );
-      if (result == null || result.files.isEmpty) return;
-      final file = result.files.first;
-      String contents;
-      if (file.bytes != null) {
-        contents = const Utf8Decoder().convert(file.bytes!);
-      } else if (file.path != null) {
-        contents = await File(file.path!).readAsString();
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to read file')));
-        return;
-      }
-      await _importCsvFromString(contents);
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to pick file: $e')));
-    }
-  }
-
-  Future<void> _openImportDialog() async {
-    final controller = TextEditingController();
-    final action = await showDialog<String?>(
+  Future<void> _handleSignOut() async {
+    HapticFeedback.mediumImpact();
+    // Show confirmation
+    final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Import CSV'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text('Paste CSV contents here (or pick a CSV file).'),
-            const SizedBox(height: 8),
-            TextField(controller: controller, maxLines: 8, decoration: const InputDecoration(border: OutlineInputBorder())),
-          ],
-        ),
+        title: const Text("Sign Out"),
+        content: const Text("Are you sure you want to sign out?"),
         actions: [
-          TextButton(onPressed: () => Navigator.of(ctx).pop('pick'), child: const Text('Pick CSV file')),
-          TextButton(onPressed: () => Navigator.of(ctx).pop(null), child: const Text('Cancel')),
-          TextButton(onPressed: () => Navigator.of(ctx).pop('import'), child: const Text('Import')),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancel")),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text("Sign Out", style: TextStyle(color: Colors.red))),
         ],
       ),
     );
 
-    if (action == 'pick') {
-      await _pickCsvFileAndImport();
-      return;
-    }
-    if (action == 'import') {
-      await _importCsvFromString(controller.text);
-      return;
-    }
-  }
-
-  Future<void> _onSignOut() async {
-    await AuthService.signOut();
-    if (widget.onSignOut != null) {
-      try {
-        await widget.onSignOut!();
-      } catch (e) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Sign out failed: $e')));
+    if (confirm == true) {
+      if (_isGuest) {
+        await LocalStorage.setGuest(false);
+      } else {
+        await AuthService.signOut();
       }
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Sign out not configured')));
+      if (mounted) Navigator.of(context).pushNamedAndRemoveUntil('/', (r) => false);
     }
   }
 
-  Widget _buildHeader(BuildContext context, Uint8List? imgBytes) {
-    final theme = Theme.of(context);
-    final initials = _profile?.name.isNotEmpty == true ? _profile!.name.trim().split(' ').map((s) => s.isNotEmpty ? s[0] : '').take(2).join() : '';
-    return Row(
-      children: [
-        CircleAvatar(
-          radius: 32,
-          backgroundColor: theme.colorScheme.primary.withOpacity(0.08),
-          backgroundImage: imgBytes != null ? MemoryImage(imgBytes) : null,
-          child: imgBytes == null ? Text(initials.isEmpty ? 'S' : initials, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600)) : null,
-        ),
-        const SizedBox(width: 12),
-        Expanded(
+  // --- Theme Selection Dialog ---
+  void _showThemeSelector() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        final isDark = Theme.of(context).brightness == Brightness.dark;
+        return Container(
+          decoration: BoxDecoration(
+            color: isDark ? const Color(0xFF1C1C1E) : Colors.white,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          padding: const EdgeInsets.all(24),
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Text(_profile?.name ?? '', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-              const SizedBox(height: 4),
-              Text(_authUser?.email ?? '', style: TextStyle(color: Colors.grey[400])),
+              const Text("App Theme", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 20),
+              _buildThemeOption("System Default", ThemeMode.system, Icons.brightness_auto),
+              _buildThemeOption("Light Mode", ThemeMode.light, Icons.light_mode),
+              _buildThemeOption("Dark Mode", ThemeMode.dark, Icons.dark_mode),
+              const SizedBox(height: 20),
             ],
           ),
-        ),
-        IconButton(
-          onPressed: widget.onOpenSettings ?? () { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Settings not configured'))); },
-          icon: const Icon(Icons.settings_outlined),
-        ),
-        IconButton(
-          onPressed: _openEditSheet,
-          icon: const Icon(Icons.edit_outlined),
-        ),
-      ],
+        );
+      },
     );
   }
 
-  Widget _buildBudgetsCard(BuildContext context) {
-    final theme = Theme.of(context);
-    final budgetsCount = _profile?.budgetsCount ?? 0;
-    final spent = _profile?.spentThisMonth ?? 0.0;
-    final safe = _profile?.safeToSpendEstimate ?? 0.0;
-
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: theme.cardColor,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [
-          BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 8, offset: const Offset(0, 4)),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Expanded(child: Text('Budgets', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16))),
-              Text('$budgetsCount', style: TextStyle(color: theme.colorScheme.primary, fontWeight: FontWeight.w700)),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(child: Text('Spent this month', style: TextStyle(color: Colors.grey[400]))),
-              Text('₹ ${spent.toStringAsFixed(0)}', style: const TextStyle(fontWeight: FontWeight.w600)),
-            ],
-          ),
-          const SizedBox(height: 6),
-          Row(
-            children: [
-              Expanded(child: Text('Safe to spend (est.)', style: TextStyle(color: Colors.grey[400]))),
-              Text('₹ ${safe.toStringAsFixed(0)}', style: TextStyle(color: theme.colorScheme.primary, fontWeight: FontWeight.w700)),
-            ],
-          ),
-        ],
-      ),
+  Widget _buildThemeOption(String label, ThemeMode mode, IconData icon) {
+    final isSelected = ThemeNotifier.themeMode.value == mode;
+    return ListTile(
+      leading: Icon(icon, color: isSelected ? Colors.blue : Colors.grey),
+      title: Text(label, style: TextStyle(color: isSelected ? Colors.blue : null, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal)),
+      trailing: isSelected ? const Icon(Icons.check, color: Colors.blue) : null,
+      onTap: () {
+        ThemeNotifier.setTheme(mode);
+        Navigator.pop(context);
+      },
     );
+  }
+
+  Future<void> _requestNotificationPermission(bool value) async {
+    if (value) {
+      final status = await Permission.notification.request();
+      if (status.isPermanentlyDenied) {
+        openAppSettings();
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_loading) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bgColor = isDark ? const Color(0xFF000000) : const Color(0xFFF2F2F7);
+
+    // Get Name & Image
+    final displayName = _profile?.name.isNotEmpty == true
+        ? _profile!.name
+        : (_authUser?.displayName ?? "User");
+
+    // Check if Google Photo exists, else use base64, else use initial
+    ImageProvider? profileImage;
+    if (_authUser?.photoURL != null) {
+      profileImage = NetworkImage(_authUser!.photoURL!);
+    } else if (_profile?.imageBase64.isNotEmpty == true) {
+      try {
+        profileImage = MemoryImage(base64Decode(_profile!.imageBase64));
+      } catch (_) {}
     }
-    final img = _imageBytes();
-    final theme = Theme.of(context);
+
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Profile'),
-        elevation: 0,
-        backgroundColor: theme.scaffoldBackgroundColor,
-        actions: [
-          // settings in top bar (user requested)
-          IconButton(
-            onPressed: widget.onOpenSettings ?? () { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Settings not configured'))); },
-            icon: const Icon(Icons.settings_outlined),
+      backgroundColor: bgColor,
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : CustomScrollView(
+        physics: const BouncingScrollPhysics(),
+        slivers: [
+          SliverAppBar(
+            backgroundColor: bgColor,
+            expandedHeight: 100,
+            pinned: true,
+            elevation: 0,
+            flexibleSpace: FlexibleSpaceBar(
+              titlePadding: const EdgeInsets.only(left: 24, bottom: 16),
+              title: Text('Profile', style: TextStyle(color: isDark ? Colors.white : Colors.black, fontWeight: FontWeight.w800, fontSize: 28)),
+            ),
+          ),
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: Column(
+                children: [
+                  // 1. Profile Card
+                  _AnimatedSection(
+                    controller: _animController, delay: 0,
+                    child: Container(
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: isDark ? const Color(0xFF1C1C1E) : Colors.white,
+                        borderRadius: BorderRadius.circular(24),
+                      ),
+                      child: Row(
+                        children: [
+                          GestureDetector(
+                            onTap: () async {
+                              final res = await showModalBottomSheet(
+                                  context: context,
+                                  isScrollControlled: true,
+                                  backgroundColor: Colors.transparent,
+                                  builder: (_) => ProfileEditSheet(initial: _profile!)
+                              );
+                              if(res != null) setState(() => _profile = res);
+                            },
+                            child: Stack(
+                              children: [
+                                CircleAvatar(
+                                  radius: 35,
+                                  backgroundColor: Colors.grey.shade200,
+                                  backgroundImage: profileImage,
+                                  child: profileImage == null ? Text(displayName[0].toUpperCase(), style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.grey)) : null,
+                                ),
+                                Positioned(
+                                  bottom: 0, right: 0,
+                                  child: Container(padding: const EdgeInsets.all(4), decoration: const BoxDecoration(color: Colors.blue, shape: BoxShape.circle), child: const Icon(Icons.edit, size: 12, color: Colors.white)),
+                                )
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 20),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(displayName, style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black)),
+                                Text(_authUser?.email ?? (_isGuest ? "Guest Mode" : ""), style: TextStyle(fontSize: 14, color: Colors.grey[500])),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 24),
+
+                  // 2. Stats
+                  _AnimatedSection(controller: _animController, delay: 100, child: Row(children: [
+                    Expanded(child: _StatBox('Safe Spend', '₹${_safeToSpend.toStringAsFixed(0)}', Colors.green, isDark)),
+                    const SizedBox(width: 12),
+                    Expanded(child: _StatBox('Mo. Spent', '₹${_monthlySpent.toStringAsFixed(0)}', Colors.redAccent, isDark)),
+                    const SizedBox(width: 12),
+                    Expanded(child: _StatBox('Budgets', '$_activeBudgets', Colors.blue, isDark)),
+                  ])),
+
+                  const SizedBox(height: 32),
+
+                  // 3. Settings
+                  _AnimatedSection(controller: _animController, delay: 200, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    _SectionHeader('PREFERENCES'),
+                    _SettingsGroup(isDark: isDark, children: [
+                      _SettingsTile(
+                        icon: Icons.brightness_6_rounded,
+                        title: 'App Theme',
+                        subtitle: _getThemeName(),
+                        isDark: isDark,
+                        onTap: _showThemeSelector,
+                      ),
+                      _SettingsTile(
+                        icon: Icons.notifications_rounded,
+                        title: 'Notifications',
+                        isDark: isDark,
+                        trailing: Switch.adaptive(value: true, activeColor: Colors.blue, onChanged: _requestNotificationPermission),
+                      ),
+                      Container(
+                        key: _exportKey,
+                        child: _SettingsTile(icon: Icons.cloud_download_rounded, title: 'Export CSV', isDark: isDark, onTap: () => ExportImportService.exportAllCsv(context)),
+                      ),
+                    ]),
+
+                    const SizedBox(height: 24),
+
+                    _SectionHeader('ABOUT'),
+                    _SettingsGroup(isDark: isDark, children: [
+                      _SettingsTile(icon: Icons.system_update_rounded, title: 'Check for Updates', isDark: isDark, onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AppUpdateScreen()))),
+                      _SettingsTile(icon: Icons.description_rounded, title: 'Terms & Conditions', isDark: isDark, onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SimpleInfoScreen(title: "Terms", content: "Terms and conditions go here...")))),
+                      _SettingsTile(icon: Icons.privacy_tip_rounded, title: 'Privacy Policy', isDark: isDark, onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SimpleInfoScreen(title: "Privacy", content: "Privacy policy goes here...")))),
+                      _SettingsTile(icon: Icons.info_rounded, title: 'About FinFlow', isDark: isDark, onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AboutAppScreen()))),
+                    ]),
+
+                    const SizedBox(height: 40),
+
+                    SizedBox(
+                      width: double.infinity,
+                      height: 56,
+                      child: ElevatedButton(
+                        onPressed: _handleSignOut,
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent.withOpacity(0.1), elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
+                        child: const Text("Sign Out", style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 16)),
+                      ),
+                    ),
+
+                    const SizedBox(height: 100),
+                  ])),
+                ],
+              ),
+            ),
           ),
         ],
       ),
-      body: RefreshIndicator(
-        onRefresh: _loadProfile,
-        child: ListView(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
-          children: [
-            _buildHeader(context, img),
-            const SizedBox(height: 18),
-            _buildBudgetsCard(context),
-            const SizedBox(height: 16),
-            SizedBox(
-              height: 52,
-              child: ElevatedButton.icon(
-                onPressed: _exporting ? null : _exportFlow,
-                icon: const Icon(Icons.upload_file),
-                label: _exporting ? const Text('Exporting...') : const Text('Export CSV (budgets & expenses)'),
-                style: ElevatedButton.styleFrom(
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              height: 52,
-              child: OutlinedButton.icon(
-                onPressed: _importing ? null : _openImportDialog,
-                icon: const Icon(Icons.download),
-                label: _importing ? const Text('Importing...') : const Text('Import CSV'),
-                style: OutlinedButton.styleFrom(
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                ),
-              ),
-            ),
-            const SizedBox(height: 14),
-            ListTile(
-              leading: const Icon(Icons.info_outline),
-              title: const Text('Export / Import help'),
-              subtitle: const Text('How to export and import CSV files'),
-              onTap: () {
-                showModalBottomSheet(
-                  context: context,
-                  builder: (ctx) => Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: const [
-                        Text('Export & Import help', style: TextStyle(fontWeight: FontWeight.bold)),
-                        SizedBox(height: 8),
-                        Text('• Tap Export CSV to choose which data to export (Budgets, Expenses, or Both).'),
-                        Text('• Then choose Download (saves to Downloads folder) or Share (share sheet).'),
-                        Text('• To import, paste CSV contents or pick a CSV file.'),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
-            const SizedBox(height: 18),
-            SizedBox(
-              height: 52,
-              child: OutlinedButton(
-                onPressed: _onSignOut,
-                style: OutlinedButton.styleFrom(
-                  side: BorderSide(color: Colors.redAccent),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                ),
-                child: const Text('Sign out', style: TextStyle(color: Colors.redAccent)),
-              ),
-            ),
-            const SizedBox(height: 30),
-            const Divider(),
-            const SizedBox(height: 8),
-            const Text('Troubleshooting', style: TextStyle(fontWeight: FontWeight.w700)),
-            const SizedBox(height: 6),
-            const Text('If avatar does not show, make sure image bytes are saved and valid base64.'),
-            const SizedBox(height: 60),
-          ],
-        ),
-      ),
     );
+  }
+
+  String _getThemeName() {
+    final mode = ThemeNotifier.themeMode.value;
+    if (mode == ThemeMode.light) return "Light";
+    if (mode == ThemeMode.dark) return "Dark";
+    return "System Default";
+  }
+}
+
+// --- Components ---
+class _StatBox extends StatelessWidget {
+  final String label; final String value; final Color color; final bool isDark;
+  const _StatBox(this.label, this.value, this.color, this.isDark);
+  @override Widget build(BuildContext context) {
+    return Container(padding: const EdgeInsets.symmetric(vertical: 16), decoration: BoxDecoration(color: isDark ? const Color(0xFF1C1C1E) : Colors.white, borderRadius: BorderRadius.circular(16)), child: Column(children: [Text(label, style: TextStyle(fontSize: 12, color: Colors.grey[500])), const SizedBox(height: 4), Text(value, style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: color))]));
+  }
+}
+
+class _SettingsGroup extends StatelessWidget {
+  final List<Widget> children; final bool isDark;
+  const _SettingsGroup({required this.children, required this.isDark});
+  @override Widget build(BuildContext context) {
+    return Container(decoration: BoxDecoration(color: isDark ? const Color(0xFF1C1C1E) : Colors.white, borderRadius: BorderRadius.circular(16)), child: Column(children: children));
+  }
+}
+
+class _SettingsTile extends StatelessWidget {
+  final IconData icon; final String title; final String? subtitle; final bool isDark; final Widget? trailing; final VoidCallback? onTap;
+  const _SettingsTile({required this.icon, required this.title, this.subtitle, required this.isDark, this.trailing, this.onTap});
+  @override Widget build(BuildContext context) {
+    return ListTile(onTap: onTap, leading: Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: isDark ? Colors.grey[800] : Colors.grey[100], borderRadius: BorderRadius.circular(8)), child: Icon(icon, size: 20, color: isDark ? Colors.white : Colors.black)), title: Text(title, style: TextStyle(fontWeight: FontWeight.w600, color: isDark ? Colors.white : Colors.black)), subtitle: subtitle != null ? Text(subtitle!, style: TextStyle(color: Colors.grey[500], fontSize: 12)) : null, trailing: trailing ?? const Icon(Icons.chevron_right, color: Colors.grey));
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  final String title; const _SectionHeader(this.title);
+  @override Widget build(BuildContext context) => Padding(padding: const EdgeInsets.only(left: 12, bottom: 8), child: Text(title, style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey[600], letterSpacing: 1.0)));
+}
+
+class _AnimatedSection extends StatelessWidget {
+  final Widget child; final int delay; final AnimationController controller;
+  const _AnimatedSection({required this.child, required this.delay, required this.controller});
+  @override Widget build(BuildContext context) {
+    return AnimatedBuilder(animation: controller, builder: (ctx, _) {
+      final start = delay / 800.0;
+      final curve = CurvedAnimation(parent: controller, curve: Interval(start, (start + 0.4).clamp(0.0, 1.0), curve: Curves.easeOut));
+      return Opacity(opacity: curve.value, child: Transform.translate(offset: Offset(0, 20 * (1 - curve.value)), child: child));
+    });
   }
 }

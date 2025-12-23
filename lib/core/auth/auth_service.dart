@@ -24,6 +24,23 @@ class AuthService {
     );
   }
 
+  // Inside lib/core/auth/auth_service.dart
+
+  static Future<void> sendPasswordResetEmail(String email) async {
+    try {
+      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+    } on FirebaseAuthException catch (e) {
+      // Handle specific Firebase errors if you want
+      if (e.code == 'user-not-found') {
+        throw Exception('No user found for that email.');
+      } else {
+        throw Exception(e.message ?? 'Failed to send reset email');
+      }
+    } catch (e) {
+      throw Exception(e.toString());
+    }
+  }
+
   static Future<UserCredential> signInWithEmail({
     required String email,
     required String password,

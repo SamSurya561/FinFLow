@@ -1,47 +1,64 @@
 plugins {
     id("com.android.application")
     id("kotlin-android")
-    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
     id("com.google.gms.google-services")
 }
 
-android {
-    namespace = "com.sun.finflow"
-    compileSdk = flutter.compileSdkVersion
-    ndkVersion = "29.0.14206865"
+import java.util.Properties
+        import java.io.FileInputStream
 
+        android {
+            namespace = "com.sun.finflow"
+            compileSdk = flutter.compileSdkVersion
+            ndkVersion = "29.0.14206865"
 
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
-    }
+            compileOptions {
+                sourceCompatibility = JavaVersion.VERSION_11
+                targetCompatibility = JavaVersion.VERSION_11
+            }
 
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_11.toString()
-    }
+            kotlinOptions {
+                jvmTarget = JavaVersion.VERSION_11.toString()
+            }
 
-    defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.sun.finflow"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
-        versionCode = 1
-        versionName = "0.1.5-Beta"
-    }
+            defaultConfig {
+                applicationId = "com.sun.finflow"
+                minSdk = 21
+                targetSdk = flutter.targetSdkVersion
+                versionCode = 1
+                versionName = "0.1.5-Beta"
+            }
 
-    buildTypes {
-        release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // --- FIX: Define keystore properties INSIDE the android block ---
+            val keystoreProperties = Properties()
+            val keystorePropertiesFile = rootProject.file("key.properties")
+            if (keystorePropertiesFile.exists()) {
+                keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+            }
+            // -------------------------------------------------------------
+
+            signingConfigs {
+                create("release") {
+                    // We use safe calls (?.) to prevent build crashes if the file is empty
+                    keyAlias = keystoreProperties["keyAlias"] as String? ?: "sun"
+                    keyPassword = keystoreProperties["keyPassword"] as String? ?: ""
+                    storeFile = if (keystoreProperties["storeFile"] != null) file(keystoreProperties["storeFile"] as String) else null
+                    storePassword = keystoreProperties["storePassword"] as String? ?: ""
+                }
+            }
+
+            buildTypes {
+                release {
+                    signingConfig = signingConfigs.getByName("release")
+                    // Optional: Enable shrinking for smaller APK size
+                    // isMinifyEnabled = true
+                    // isShrinkResources = true
+                    // proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+                }
+            }
         }
-    }
-}
 
 flutter {
     source = "../.."
 }
-

@@ -1,6 +1,7 @@
 {
   "project_info": {
     "project_number": "587598364054",
+    "firebase_url": "https://finflow-00-default-rtdb.firebaseio.com",
     "project_id": "finflow-00",
     "storage_bucket": "finflow-00.firebasestorage.app"
   },
@@ -13,6 +14,22 @@
         }
       },
       "oauth_client": [
+        {
+          "client_id": "587598364054-c5heqroom13t24biiqk9topn31ciud4s.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.sun.finflow",
+            "certificate_hash": "9589ea2e24be2c9d4243026ebcaf1a7a4b54cfca"
+          }
+        },
+        {
+          "client_id": "587598364054-p8dm56b8dqrhri78g6loc7k8017n9mq3.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.sun.finflow",
+            "certificate_hash": "2e92540b0a2fea98c223efe8e6cb52e7b62dd10e"
+          }
+        },
         {
           "client_id": "587598364054-0vnvo6ffdlvfrc2bp6t5e15okmvfehab.apps.googleusercontent.com",
           "client_type": 3
@@ -29,6 +46,13 @@
             {
               "client_id": "587598364054-0vnvo6ffdlvfrc2bp6t5e15okmvfehab.apps.googleusercontent.com",
               "client_type": 3
+            },
+            {
+              "client_id": "587598364054-rn6bv9bfe14u3o9s6fu0v8ia75db4u7g.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.sun.finflow"
+              }
             }
           ]
         }

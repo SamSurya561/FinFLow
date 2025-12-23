@@ -3,25 +3,34 @@ class Budget {
   final String id;
   final String category;
   final double limit;
-  final bool rollover;
+  final bool rollover; // <--- Added this missing field
 
   Budget({
     required this.id,
     required this.category,
     required this.limit,
-    this.rollover = false,
+    this.rollover = false, // Default to false
   });
 
-  factory Budget.fromJson(Map<String, dynamic> j) {
+  // Firestore Support
+  Map<String, dynamic> toMap() {
+    return {
+      'category': category,
+      'limit': limit,
+      'rollover': rollover,
+    };
+  }
+
+  factory Budget.fromMap(Map<String, dynamic> map, String docId) {
     return Budget(
-      id: (j['id'] ?? '').toString(),
-      category: (j['category'] ?? '').toString(),
-      // defensive: parse numeric types to double
-      limit: (j['limit'] is num) ? (j['limit'] as num).toDouble() : double.tryParse((j['limit'] ?? '0').toString()) ?? 0.0,
-      rollover: (j['rollover'] is bool) ? j['rollover'] as bool : (j['rollover']?.toString().toLowerCase() == 'true'),
+      id: docId,
+      category: map['category'] ?? '',
+      limit: (map['limit'] ?? 0).toDouble(),
+      rollover: map['rollover'] ?? false,
     );
   }
 
+  // JSON / LocalStorage Support
   Map<String, dynamic> toJson() {
     return {
       'id': id,
@@ -31,12 +40,12 @@ class Budget {
     };
   }
 
-  Budget copyWith({String? id, String? category, double? limit, bool? rollover}) {
+  factory Budget.fromJson(Map<String, dynamic> json) {
     return Budget(
-      id: id ?? this.id,
-      category: category ?? this.category,
-      limit: limit ?? this.limit,
-      rollover: rollover ?? this.rollover,
+      id: json['id'] ?? '',
+      category: json['category'] ?? '',
+      limit: (json['limit'] ?? 0).toDouble(),
+      rollover: json['rollover'] ?? false,
     );
   }
 }

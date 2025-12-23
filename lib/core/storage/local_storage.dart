@@ -8,6 +8,62 @@ class LocalStorage {
   // EXPENSES (existing – unchanged)
   // ---------------------------------------------------------------------------
   static const String _expensesKey = 'finflow_expenses';
+  static const String _keySeenOnboarding = 'seen_onboarding';
+  static const String _keySeenDashIntro = 'seen_dash_intro';
+  static const String _keySeenProfileIntro = 'seen_profile_intro';
+  static const String _keySeenBudgetIntro = 'seen_budget_intro';      // <--- NEW
+  static const String _keySeenAddExpenseIntro = 'seen_add_exp_intro'; // <--- NEW
+
+  // OnBoarding
+  static Future<bool> hasSeenOnboarding() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_keySeenOnboarding) ?? false;
+  }
+
+  static Future<void> setSeenOnboarding() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keySeenOnboarding, true);
+  }
+
+  // Dashboard
+  static Future<bool> hasSeenDashIntro() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_keySeenDashIntro) ?? false;
+  }
+  static Future<void> setSeenDashIntro() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keySeenDashIntro, true);
+  }
+
+  // Profile
+  static Future<bool> hasSeenProfileIntro() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_keySeenProfileIntro) ?? false;
+  }
+  static Future<void> setSeenProfileIntro() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keySeenProfileIntro, true);
+  }
+
+  // Budgets
+  static Future<bool> hasSeenBudgetIntro() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_keySeenBudgetIntro) ?? false;
+  }
+  static Future<void> setSeenBudgetIntro() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keySeenBudgetIntro, true);
+  }
+
+  // Add Expense
+  static Future<bool> hasSeenAddExpenseIntro() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_keySeenAddExpenseIntro) ?? false;
+  }
+  static Future<void> setSeenAddExpenseIntro() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keySeenAddExpenseIntro, true);
+  }
 
   static Future<List<Expense>> getExpenses() async {
     final prefs = await SharedPreferences.getInstance();
@@ -146,4 +202,6 @@ class LocalStorage {
       return null;
     }
   }
+
+  static const String _guestKey = 'finflow_is_guest'; static Future<bool> isGuest() async { final prefs = await SharedPreferences.getInstance(); return prefs.getBool(_guestKey) ?? false; } static Future<void> setGuest(bool isGuest) async { final prefs = await SharedPreferences.getInstance(); await prefs.setBool(_guestKey, isGuest); }
 }

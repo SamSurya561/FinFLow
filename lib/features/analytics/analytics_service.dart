@@ -1,57 +1,62 @@
-import '../transactions/models/expense_model.dart';
-import '../../core/utils/date_utils.dart';
+import 'package:intl/intl.dart';
+import '../../core/models/transaction_model.dart'; // Ensure this import points to your new model
 
 class AnalyticsService {
-  // check if two dates fall in the same year + month
-  static bool isSameMonth(DateTime a, DateTime b) {
-    return a.year == b.year && a.month == b.month;
-  }
 
-  // already existing methods (keep these if you added earlier)
-  static double monthlyTotal(List expenses, DateTime month) {
-    return expenses
-        .where((e) => isSameMonth(e.date, month))
-        .fold(0.0, (p, e) => p + e.amount);
-  }
+  /// Calculates daily totals for the last 7 days.
+  /// Used for the Dashboard Bar Chart.
+  static Map<String, dynamic> last7DaysTotalsModel(List<TransactionModel> transactions) {
+    List<double> totals = [];
+    List<String> labels = [];
+    final now = DateTime.now();
 
-  static Map<String, double> categoryTotalsForMonth(
-      List expenses, DateTime month) {
-    final Map<String, double> map = {};
-    for (final e in expenses) {
-      if (isSameMonth(e.date, month)) {
-        map[e.category] = (map[e.category] ?? 0) + e.amount;
-      }
-    }
-    return map;
-  }
-  /// Returns list of 7 doubles: totals for [today -6] .. [today]
-  /// and a list of labels (Mon/Tue/...).
-  static Map<String, dynamic> last7DaysTotals(List expenses, [DateTime? from]) {
-    final now = from ?? DateTime.now();
-    final List<double> totals = List.filled(7, 0.0);
-    final List<String> labels = List.filled(7, '');
+    // Loop backwards from 6 days ago to today
+    for (int i = 6; i >= 0; i--) {
+      final day = now.subtract(Duration(days: i));
+      final dayLabel = DateFormat('E').format(day); // e.g., "Mon", "Tue"
 
-    for (int i = 0; i < 7; i++) {
-      final day = DateTime(now.year, now.month, now.day).subtract(Duration(days: 6 - i));
-      labels[i] = _shortWeekday(day.weekday);
-      final dayStart = DateTime(day.year, day.month, day.day);
-      final dayEnd = dayStart.add(const Duration(days: 1));
-      double sum = 0.0;
-      for (final e in expenses) {
-        if (!e.date.isBefore(dayStart) && e.date.isBefore(dayEnd)) {
-          sum += e.amount;
+      double dailySum = 0;
+      for (var t in transactions) {
+        // Check if transaction date matches the current loop day
+        if (t.date.year == day.year && t.date.month == day.month && t.date.day == day.day) {
+          dailySum += t.amount;
         }
       }
-      totals[i] = sum;
+      totals.add(dailySum);
+      labels.add(dayLabel);
     }
 
     return {'totals': totals, 'labels': labels};
   }
 
-  static String _shortWeekday(int weekday) {
-    // 1 = Monday ... 7 = Sunday
-    const names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-    return names[(weekday - 1) % 7];
+  /// Calculates total spent per category for a specific month.
+  /// Used for the Dashboard Pie Chart.
+  static Map<String, double> categoryTotalsForMonthModel(List<TransactionModel> transactions, DateTime month) {
+    Map<String, double> categoryMap = {};
+
+    for (var t in transactions) {
+      // Filter by Month & Year
+      if (t.date.year == month.year && t.date.month == month.month) {
+        if (!categoryMap.containsKey(t.category)) {
+          categoryMap[t.category] = 0;
+        }
+        categoryMap[t.category] = categoryMap[t.category]! + t.amount;
+      }
+    }
+
+    return categoryMap;
+  }
+
+  /// Calculates total EXPENSES for a specific month.
+  /// Used for the "Monthly Spent" stat on the Dashboard.
+  static double monthlyTotal(List<TransactionModel> transactions, DateTime month) {
+    double sum = 0;
+    for (var t in transactions) {
+      // Logic: Only sum up if it is an EXPENSE and matches the month
+      if (t.type == TxnType.expense && t.date.year == month.year && t.date.month == month.month) {
+        sum += t.amount;
+      }
+    }
+    return sum;
   }
 }
-

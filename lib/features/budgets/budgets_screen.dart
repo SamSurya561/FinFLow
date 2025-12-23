@@ -1,19 +1,14 @@
-// lib/features/budgets/budgets_screen.dart
-import 'package:flutter/cupertino.dart';
+import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:fl_chart/fl_chart.dart'; // For the radial gauge
+import 'package:tutorial_coach_mark/tutorial_coach_mark.dart';
 import '../../core/storage/local_storage.dart';
-import '../../core/theme/app_theme.dart';
+import '../../core/storage/profile_storage.dart'; // To sync stats
 import '../transactions/models/expense_model.dart';
-import '../transactions/transactions_screen.dart';
+import '../transactions/transactions_screen.dart'; // For navigation
 import 'models/budget_model.dart';
 import 'storage/budget_storage.dart';
-
-/// Helper: normalize category -> Title case single word.
-String _normalizeCategory(String s) {
-  final t = s.trim();
-  if (t.isEmpty) return t;
-  return '${t[0].toUpperCase()}${t.substring(1).toLowerCase()}';
-}
 
 class BudgetsScreen extends StatefulWidget {
   const BudgetsScreen({super.key});
@@ -22,438 +17,669 @@ class BudgetsScreen extends StatefulWidget {
   State<BudgetsScreen> createState() => _BudgetsScreenState();
 }
 
-class _BudgetsScreenState extends State<BudgetsScreen> {
+class _BudgetsScreenState extends State<BudgetsScreen> with SingleTickerProviderStateMixin {
   List<Budget> _budgets = [];
+  List<Expense> _expenses = [];
   bool _loading = true;
+
+  // Animation
+  late AnimationController _animController;
+
+  // --- Tutorial Keys ---
+  final GlobalKey _summaryKey = GlobalKey();
+  final GlobalKey _addKey = GlobalKey();
 
   @override
   void initState() {
     super.initState();
-    _refresh();
+    _animController = AnimationController(vsync: this, duration: const Duration(milliseconds: 800));
+    _loadData();
+    _checkTutorial(); // <--- Check Tutorial
   }
 
-  Future<void> _refresh() async {
+  Future<void> _checkTutorial() async {
+    await Future.delayed(const Duration(milliseconds: 1000));
+    final seen = await LocalStorage.hasSeenBudgetIntro();
+    if (!seen && mounted) {
+      _showTutorial();
+      await LocalStorage.setSeenBudgetIntro();
+    }
+  }
+
+  void _showTutorial() {
+    TutorialCoachMark(
+      targets: [
+        TargetFocus(
+          identify: "summary_ring",
+          keyTarget: _summaryKey,
+          shape: ShapeLightFocus.RRect,
+          radius: 20,
+          contents: [
+            TargetContent(
+              align: ContentAlign.bottom,
+              builder: (context, controller) {
+                return const Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text("Budget Overview", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 20)),
+                    Padding(
+                      padding: EdgeInsets.only(top: 10.0),
+                      child: Text("This ring shows your TOTAL spending vs limits across all categories.", style: TextStyle(color: Colors.white)),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ],
+        ),
+        TargetFocus(
+          identify: "add_budget",
+          keyTarget: _addKey,
+          alignSkip: Alignment.bottomLeft,
+          contents: [
+            TargetContent(
+              align: ContentAlign.bottom,
+              builder: (context, controller) {
+                return const Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text("Create Budget", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 20)),
+                    Padding(
+                      padding: EdgeInsets.only(top: 10.0),
+                      child: Text("Tap here to set a monthly limit for Food, Travel, or Shopping.", style: TextStyle(color: Colors.white)),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ],
+        ),
+      ],
+      colorShadow: Colors.black,
+      opacityShadow: 0.85,
+      textSkip: "GOT IT",
+      onFinish: () {},
+    ).show(context: context);
+  }
+
+  @override
+  void dispose() {
+    _animController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadData() async {
     setState(() => _loading = true);
-    final list = await BudgetStorage.getBudgets();
-    setState(() {
-      _budgets = list ?? [];
-      _loading = false;
-    });
+    final b = await BudgetStorage.getBudgets();
+    final e = await LocalStorage.getExpenses();
+
+    if (mounted) {
+      setState(() {
+        _budgets = b;
+        _expenses = e;
+        _loading = false;
+      });
+      _animController.forward(from: 0);
+    }
   }
 
-  double _spentForBudget(Budget b, List<Expense> allExpenses) {
-    final month = DateTime.now();
-    return allExpenses
+  double _calculateSpent(String category) {
+    final now = DateTime.now();
+    return _expenses
         .where((e) =>
-    e.category == b.category &&
-        e.date.year == month.year &&
-        e.date.month == month.month)
-        .fold(0.0, (p, e) => p + e.amount);
+    e.category == category &&
+        e.date.year == now.year &&
+        e.date.month == now.month)
+        .fold(0.0, (sum, item) => sum + item.amount);
   }
 
-  Future<void> _showBudgetExpensesSheet(Budget b) async {
-    final expenses = await LocalStorage.getExpenses() ?? [];
-    final month = DateTime.now();
-    final start = DateTime(month.year, month.month, 1);
-    final end = DateTime(month.year, month.month + 1, 1);
+  // --- Actions ---
 
-    final List<Expense> filtered = expenses
-        .where((e) =>
-    e.category == b.category && !e.date.isBefore(start) && e.date.isBefore(end))
-        .toList();
-
-    final total = filtered.fold(0.0, (p, e) => p + e.amount);
-
-    await showModalBottomSheet<void>(
+  Future<void> _showAddEditSheet({Budget? budget}) async {
+    HapticFeedback.mediumImpact();
+    await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (ctx) {
-        return Padding(
-          padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
-          child: SizedBox(
-            height: MediaQuery.of(ctx).size.height * 0.78,
-            child: Column(
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => _BudgetEditSheet(
+        budget: budget,
+        onSave: (newBudget) async {
+          if (budget == null) {
+            // Add (check duplicates manually or just append)
+            // Ideally we check if category exists, but for MVP we append
+            // Better: update if exists
+            final existingIdx = _budgets.indexWhere((b) => b.category == newBudget.category);
+            if (existingIdx != -1) {
+              _budgets[existingIdx] = newBudget; // Update existing logic
+            } else {
+              _budgets.add(newBudget);
+            }
+          } else {
+            // Edit
+            final idx = _budgets.indexWhere((b) => b.id == budget.id);
+            if (idx != -1) _budgets[idx] = newBudget;
+          }
+
+          await BudgetStorage.saveBudgets(_budgets);
+          _loadData(); // Refresh UI
+        },
+      ),
+    );
+  }
+
+  Future<void> _deleteBudget(Budget b) async {
+    HapticFeedback.heavyImpact();
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete Budget?'),
+        content: Text('Remove the budget for ${b.category}?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Delete', style: TextStyle(color: Colors.red))),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      await BudgetStorage.deleteBudgetById(b.id);
+      _loadData();
+    }
+  }
+
+  // --- UI ---
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bgColor = isDark ? const Color(0xFF000000) : const Color(0xFFF2F2F7);
+
+    // Totals for the Header
+    double totalLimit = 0;
+    double totalSpent = 0;
+    for (var b in _budgets) {
+      totalLimit += b.limit;
+      totalSpent += _calculateSpent(b.category);
+    }
+
+    return Scaffold(
+      backgroundColor: bgColor,
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : CustomScrollView(
+        physics: const BouncingScrollPhysics(),
+        slivers: [
+          // 1. Large Header
+          SliverAppBar(
+            backgroundColor: bgColor,
+            expandedHeight: 120,
+            pinned: true,
+            elevation: 0,
+            flexibleSpace: FlexibleSpaceBar(
+              titlePadding: const EdgeInsets.only(left: 20, bottom: 16),
+              title: Text(
+                'Monthly Budgets',
+                style: TextStyle(
+                  color: isDark ? Colors.white : Colors.black,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 28,
+                ),
+              ),
+            ),
+            actions: [
+              IconButton(
+                key: _addKey, // <--- Key Attached
+                icon: Icon(Icons.add_circle_outline_rounded, color: Theme.of(context).primaryColor, size: 28),
+                onPressed: () => _showAddEditSheet(),
+              ),
+              const SizedBox(width: 16),
+            ],
+          ),
+
+          // 2. Summary Circular Indicator
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: Column(
+                key: _summaryKey, // <--- Key Attached
+                children: [
+                  _BudgetSummaryRing(
+                    totalLimit: totalLimit,
+                    totalSpent: totalSpent,
+                    isDark: isDark,
+                  ),
+                  const SizedBox(height: 32),
+                ],
+              ),
+            ),
+          ),
+
+          // 3. Budget List
+          if (_budgets.isEmpty)
+            SliverFillRemaining(
+              hasScrollBody: false,
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.pie_chart_outline_rounded, size: 64, color: Colors.grey.withOpacity(0.3)),
+                    const SizedBox(height: 16),
+                    Text('No budgets set', style: TextStyle(color: Colors.grey.withOpacity(0.5), fontSize: 16)),
+                    const SizedBox(height: 8),
+                    TextButton(
+                      onPressed: () => _showAddEditSheet(),
+                      child: const Text('Create your first budget'),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else
+            SliverList(
+              delegate: SliverChildBuilderDelegate(
+                    (context, index) {
+                  final b = _budgets[index];
+                  final spent = _calculateSpent(b.category);
+                  // Staggered Animation
+                  final animation = CurvedAnimation(
+                    parent: _animController,
+                    curve: Interval(
+                      (index * 0.1).clamp(0.0, 1.0),
+                      1.0,
+                      curve: Curves.easeOutCubic,
+                    ),
+                  );
+
+                  return FadeTransition(
+                    opacity: animation,
+                    child: SlideTransition(
+                      position: Tween<Offset>(begin: const Offset(0, 0.2), end: Offset.zero).animate(animation),
+                      child: _BudgetCard(
+                        budget: b,
+                        spent: spent,
+                        isDark: isDark,
+                        onTap: () => _showAddEditSheet(budget: b),
+                        onLongPress: () => _deleteBudget(b),
+                      ),
+                    ),
+                  );
+                },
+                childCount: _budgets.length,
+              ),
+            ),
+
+          const SliverPadding(padding: EdgeInsets.only(bottom: 100)),
+        ],
+      ),
+    );
+  }
+}
+
+// --- Components ---
+
+class _BudgetSummaryRing extends StatelessWidget {
+  final double totalLimit;
+  final double totalSpent;
+  final bool isDark;
+
+  const _BudgetSummaryRing({required this.totalLimit, required this.totalSpent, required this.isDark});
+
+  @override
+  Widget build(BuildContext context) {
+    double percent = totalLimit == 0 ? 0 : (totalSpent / totalLimit);
+    if (percent > 1) percent = 1;
+
+    // Color logic
+    Color ringColor = const Color(0xFF30D158); // Green
+    if (percent > 0.7) ringColor = const Color(0xFFFF9F0A); // Orange
+    if (percent >= 1.0) ringColor = const Color(0xFFFF453A); // Red
+
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF1C1C1E) : Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 20, offset: const Offset(0, 10)),
+        ],
+      ),
+      child: Row(
+        children: [
+          // The Chart
+          SizedBox(
+            height: 80,
+            width: 80,
+            child: Stack(
               children: [
-                const SizedBox(height: 12),
-                Container(
-                  width: 40,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: Colors.grey[600],
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: Row(
-                    children: [
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            b.category,
-                            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                          ),
-                          const SizedBox(height: 6),
-                          Text('Total: ₹ ${total.toStringAsFixed(0)}',
-                              style: TextStyle(color: Theme.of(context).textTheme.bodySmall?.color ?? Colors.grey)),
-                        ],
+                PieChart(
+                  PieChartData(
+                    startDegreeOffset: 270,
+                    sectionsSpace: 0,
+                    centerSpaceRadius: 30,
+                    sections: [
+                      PieChartSectionData(
+                        color: ringColor,
+                        value: totalSpent,
+                        radius: 8,
+                        showTitle: false,
                       ),
-                      const Spacer(),
-                      Text('Limit: ₹ ${b.limit.toStringAsFixed(0)}',
-                          style: TextStyle(color: Theme.of(context).textTheme.bodySmall?.color ?? Colors.grey)),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: filtered.isEmpty
-                      ? Center(
-                      child: Text('No transactions for ${b.category} this month',
-                          style: TextStyle(color: Theme.of(context).textTheme.bodySmall?.color ?? Colors.grey)))
-                      : ListView.separated(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    itemCount: filtered.length,
-                    separatorBuilder: (_, __) => const Divider(),
-                    itemBuilder: (context, i) {
-                      final e = filtered[i];
-                      final time =
-                          '${e.date.day.toString().padLeft(2, '0')}-${e.date.month.toString().padLeft(2, '0')}-${e.date.year} ${e.date.hour.toString().padLeft(2, '0')}:${e.date.minute.toString().padLeft(2, '0')}';
-                      final color = _categoryColor(e.category);
-                      return ListTile(
-                        leading: CircleAvatar(backgroundColor: color, child: const Text('₹', style: TextStyle(color: Colors.white))),
-                        title: Text('₹ ${e.amount.toStringAsFixed(0)} • ${e.category}'),
-                        subtitle: e.note.isNotEmpty ? Text('${e.note}\n$time') : Text(time),
-                        isThreeLine: e.note.isNotEmpty,
-                      );
-                    },
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  child: Row(
-                    children: [
-                      Expanded(child: OutlinedButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close'))),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: ElevatedButton(
-                          onPressed: () {
-                            Navigator.pop(ctx);
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(builder: (_) => TransactionsScreen(initialCategory: b.category)),
-                            );
-                          },
-                          child: const Text('View in Transactions'),
-                        ),
+                      PieChartSectionData(
+                        color: isDark ? Colors.grey[800] : Colors.grey[200],
+                        value: (totalLimit - totalSpent) < 0 ? 0 : (totalLimit - totalSpent),
+                        radius: 8,
+                        showTitle: false,
                       ),
                     ],
+                  ),
+                ),
+                Center(
+                  child: Text(
+                    '${(percent * 100).toInt()}%',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: isDark ? Colors.white : Colors.black),
                   ),
                 ),
               ],
             ),
           ),
-        );
-      },
-    );
-  }
-
-  Color _categoryColor(String category) {
-    switch (category) {
-      case 'Food':
-        return Colors.orange;
-      case 'Travel':
-        return Colors.blue;
-      case 'Shopping':
-        return Colors.purple;
-      case 'Bills':
-        return Colors.red;
-      default:
-        return Colors.grey;
-    }
-  }
-
-  Future<void> _showAddEditDialog({Budget? budget}) async {
-    final result = await showModalBottomSheet<bool>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (ctx) {
-        return _BudgetFormSheet(budget: budget);
-      },
-    );
-
-    if (result == true) await _refresh();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_loading) return const Center(child: CircularProgressIndicator());
-
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Budgets'),
-        actions: [
-          IconButton(
-            onPressed: () => _showAddEditDialog(budget: null),
-            icon: const Icon(Icons.add),
+          const SizedBox(width: 24),
+          // The Text Stats
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('TOTAL SPENT', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.grey, letterSpacing: 1.0)),
+                const SizedBox(height: 4),
+                Text('₹${totalSpent.toStringAsFixed(0)}', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800, color: isDark ? Colors.white : Colors.black)),
+                const SizedBox(height: 4),
+                Text(
+                  'of ₹${totalLimit.toStringAsFixed(0)} limit',
+                  style: TextStyle(color: Colors.grey[500], fontSize: 14),
+                ),
+              ],
+            ),
           ),
         ],
       ),
-      body: FutureBuilder<List<Expense>>(
-        future: LocalStorage.getExpenses(),
-        builder: (context, snap) {
-          final allExpenses = snap.data ?? [];
-          return ListView.builder(
-            padding: const EdgeInsets.only(bottom: 24),
-            itemCount: _budgets.length,
-            itemBuilder: (context, i) {
-              final b = _budgets[i];
-              final spent = _spentForBudget(b, allExpenses);
-              final percent = b.limit > 0 ? (spent / b.limit).clamp(0.0, 1.0) : 0.0;
-              return Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                child: AppTheme.animatedFrostedCard(
-                  context: context,
-                  index: i,
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(14),
-                    onTap: () => _showBudgetExpensesSheet(b),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 18),
-                      child: Column(
-                        children: [
-                          Row(
-                            children: [
-                              Expanded(child: Text(b.category, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18))),
-                              Text('₹ ${b.limit.toStringAsFixed(0)}', style: const TextStyle(fontWeight: FontWeight.bold)),
-                            ],
-                          ),
-                          const SizedBox(height: 10),
-                          LinearProgressIndicator(
-                            value: percent,
-                            minHeight: 8,
-                            backgroundColor: Colors.grey[800],
-                            valueColor: AlwaysStoppedAnimation<Color>(Theme.of(context).colorScheme.primary),
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: [
-                              Text('Spent: ₹ ${spent.toStringAsFixed(0)}', style: const TextStyle(color: Colors.grey)),
-                              const Spacer(),
-                              Text('${(percent * 100).toStringAsFixed(0)}%'),
-                              const SizedBox(width: 12),
-                              IconButton(
-                                onPressed: () async {
-                                  await _showAddEditDialog(budget: b);
-                                  await _refresh();
-                                },
-                                icon: const Icon(Icons.edit_outlined),
-                              ),
-                              IconButton(
-                                onPressed: () async {
-                                  final ok = await showDialog<bool>(
-                                    context: context,
-                                    builder: (ctx) => AlertDialog(
-                                      title: const Text('Delete budget?'),
-                                      content: Text('Delete budget for "${b.category}"?'),
-                                      actions: [
-                                        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-                                        TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Delete')),
-                                      ],
-                                    ),
-                                  );
-                                  if (ok == true) {
-                                    final list = await BudgetStorage.getBudgets() ?? [];
-                                    list.removeWhere((x) => x.id == b.id);
-                                    await BudgetStorage.saveBudgets(list);
-                                    await _refresh();
-                                  }
-                                },
-                                icon: const Icon(Icons.delete_outline),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              );
-            },
-          );
-        },
-      ),
     );
   }
 }
 
-/// Bottom sheet widget for add/edit budget.
-/// Lifecycle-managed controllers to avoid the runtime crash you saw earlier.
-class _BudgetFormSheet extends StatefulWidget {
-  final Budget? budget;
+class _BudgetCard extends StatelessWidget {
+  final Budget budget;
+  final double spent;
+  final bool isDark;
+  final VoidCallback onTap;
+  final VoidCallback onLongPress;
 
-  const _BudgetFormSheet({this.budget});
+  const _BudgetCard({required this.budget, required this.spent, required this.isDark, required this.onTap, required this.onLongPress});
 
   @override
-  State<_BudgetFormSheet> createState() => _BudgetFormSheetState();
+  Widget build(BuildContext context) {
+    final double pct = budget.limit == 0 ? 0 : (spent / budget.limit);
+    final double clampedPct = pct.clamp(0.0, 1.0);
+
+    // Dynamic Status Color
+    Color statusColor = const Color(0xFF30D158);
+    if (pct > 0.75) statusColor = const Color(0xFFFF9F0A);
+    if (pct >= 1.0) statusColor = const Color(0xFFFF453A);
+
+    final remaining = budget.limit - spent;
+
+    return GestureDetector(
+      onTap: onTap,
+      onLongPress: onLongPress,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: isDark ? const Color(0xFF1C1C1E) : Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [
+            if (!isDark) BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 10, offset: const Offset(0, 4)),
+          ],
+        ),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: _getCategoryColor(budget.category).withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(
+                    _getCategoryIcon(budget.category),
+                    color: _getCategoryColor(budget.category),
+                    size: 20,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(budget.category, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                      const SizedBox(height: 4),
+                      Text(
+                        remaining < 0 ? 'Over by ₹${remaining.abs().toStringAsFixed(0)}' : '₹${remaining.toStringAsFixed(0)} left',
+                        style: TextStyle(
+                          color: remaining < 0 ? Colors.red : Colors.grey[500],
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Text(
+                  '${(pct * 100).toStringAsFixed(0)}%',
+                  style: TextStyle(fontWeight: FontWeight.bold, color: statusColor, fontSize: 16),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            // Progress Bar
+            Stack(
+              children: [
+                Container(
+                  height: 8,
+                  width: double.infinity,
+                  decoration: BoxDecoration(
+                    color: isDark ? Colors.grey[800] : Colors.grey[100],
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+                AnimatedFractionallySizedBox(
+                  duration: const Duration(milliseconds: 1000),
+                  curve: Curves.easeOutExpo,
+                  widthFactor: clampedPct,
+                  child: Container(
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: statusColor,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Color _getCategoryColor(String cat) {
+    switch (cat.toLowerCase()) {
+      case 'food': return const Color(0xFFFF9F0A);
+      case 'travel': return const Color(0xFF0A84FF);
+      case 'shopping': return const Color(0xFFBF5AF2);
+      case 'bills': return const Color(0xFFFF453A);
+      default: return const Color(0xFF32D74B);
+    }
+  }
+
+  IconData _getCategoryIcon(String cat) {
+    switch (cat.toLowerCase()) {
+      case 'food': return Icons.fastfood_rounded;
+      case 'travel': return Icons.flight_takeoff_rounded;
+      case 'shopping': return Icons.shopping_bag_rounded;
+      case 'bills': return Icons.receipt_long_rounded;
+      default: return Icons.category_rounded;
+    }
+  }
 }
 
-class _BudgetFormSheetState extends State<_BudgetFormSheet> {
-  late TextEditingController _limitController;
-  late String _category;
-  late bool _rollover;
-  final _formKey = GlobalKey<FormState>();
+class _BudgetEditSheet extends StatefulWidget {
+  final Budget? budget;
+  final Function(Budget) onSave;
 
-  // prevent double saves & show spinner
-  bool _saving = false;
+  const _BudgetEditSheet({this.budget, required this.onSave});
+
+  @override
+  State<_BudgetEditSheet> createState() => _BudgetEditSheetState();
+}
+
+class _BudgetEditSheetState extends State<_BudgetEditSheet> {
+  late TextEditingController _limitCtrl;
+  String _category = 'Food';
+  bool _rollover = false;
+
+  final List<String> _categories = ['Food', 'Travel', 'Shopping', 'Bills', 'Others'];
 
   @override
   void initState() {
     super.initState();
-    _limitController = TextEditingController(text: widget.budget?.limit.toString() ?? '');
-    _category = widget.budget?.category ?? 'Food';
-    _rollover = widget.budget?.rollover ?? false;
-  }
-
-  @override
-  void dispose() {
-    _limitController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _showDuplicateAlert(BuildContext ctx, String category) async {
-    await showDialog<void>(
-      context: ctx,
-      builder: (dctx) {
-        return AlertDialog(
-          title: const Text('Duplicate budget'),
-          content: Text('A budget for "$category" already exists.'),
-          actions: [
-            TextButton(onPressed: () => Navigator.of(dctx).pop(), child: const Text('OK')),
-          ],
-        );
-      },
-    );
+    _limitCtrl = TextEditingController(text: widget.budget?.limit.toStringAsFixed(0) ?? '');
+    if (widget.budget != null) {
+      _category = widget.budget!.category;
+      _rollover = widget.budget!.rollover;
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
-      child: SingleChildScrollView(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 18.0, vertical: 18),
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return ClipRRect(
+      borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+        child: Container(
+          padding: EdgeInsets.fromLTRB(24, 24, 24, MediaQuery.of(context).viewInsets.bottom + 24),
+          decoration: BoxDecoration(
+            color: (isDark ? const Color(0xFF1C1C1E) : Colors.white).withOpacity(0.9),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(widget.budget == null ? 'Add Budget' : 'Edit Budget', style: Theme.of(context).textTheme.titleLarge),
-              const SizedBox(height: 12),
-              Form(
-                key: _formKey,
-                child: Column(
-                  children: [
-                    TextFormField(
-                      controller: _limitController,
-                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                      decoration: const InputDecoration(labelText: 'Limit (₹)'),
-                      validator: (v) {
-                        if (v == null || v.trim().isEmpty) return 'Enter a number';
-                        final parsed = double.tryParse(v.trim());
-                        if (parsed == null) return 'Enter a valid number';
-                        return null;
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(widget.budget == null ? 'New Budget' : 'Edit Budget', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black)),
+                  IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(context)),
+                ],
+              ),
+              const SizedBox(height: 24),
+              // Category Selector
+              SizedBox(
+                height: 40,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: _categories.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 8),
+                  itemBuilder: (ctx, i) {
+                    final cat = _categories[i];
+                    final isSel = _category == cat;
+                    return GestureDetector(
+                      onTap: () {
+                        HapticFeedback.selectionClick();
+                        setState(() => _category = cat);
                       },
-                    ),
-                    const SizedBox(height: 12),
-                    DropdownButtonFormField<String>(
-                      value: _category,
-                      items: const [
-                        DropdownMenuItem(value: 'Food', child: Text('Food')),
-                        DropdownMenuItem(value: 'Travel', child: Text('Travel')),
-                        DropdownMenuItem(value: 'Shopping', child: Text('Shopping')),
-                        DropdownMenuItem(value: 'Bills', child: Text('Bills')),
-                      ],
-                      onChanged: (v) => setState(() => _category = v ?? _category),
-                      decoration: const InputDecoration(labelText: 'Category'),
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        const Text('Rollover'),
-                        const Spacer(),
-                        Switch(value: _rollover, onChanged: (v) => setState(() => _rollover = v)),
-                      ],
-                    ),
-                    const SizedBox(height: 18),
-                    Row(
-                      children: [
-                        Expanded(child: OutlinedButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel'))),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: ElevatedButton(
-                            onPressed: _saving
-                                ? null
-                                : () async {
-                              if (_formKey.currentState?.validate() != true) return;
-
-                              setState(() => _saving = true);
-                              try {
-                                final parsedLimit = double.parse(_limitController.text.trim());
-                                final list = await BudgetStorage.getBudgets() ?? [];
-                                final normalizedCategory = _category.trim().toLowerCase();
-
-                                // Duplicate check (case-insensitive), allow editing the same id.
-                                final bool wouldDuplicate = list.any((bItem) =>
-                                bItem.category.trim().toLowerCase() == normalizedCategory &&
-                                    (widget.budget == null || bItem.id != widget.budget!.id));
-
-                                if (wouldDuplicate) {
-                                  if (mounted) await _showDuplicateAlert(context, _category);
-                                  return;
-                                }
-
-                                // Save new or update existing
-                                if (widget.budget != null) {
-                                  final idx = list.indexWhere((x) => x.id == widget.budget!.id);
-                                  if (idx != -1) {
-                                    final updated = widget.budget!.copyWith(
-                                      limit: parsedLimit,
-                                      category: _normalizeCategory(_category),
-                                      rollover: _rollover,
-                                    );
-                                    list[idx] = updated;
-                                    await BudgetStorage.saveBudgets(list);
-                                  }
-                                } else {
-                                  final newB = Budget(
-                                    id: DateTime.now().millisecondsSinceEpoch.toString(),
-                                    category: _normalizeCategory(_category),
-                                    limit: parsedLimit,
-                                    rollover: _rollover,
-                                  );
-                                  list.add(newB);
-                                  await BudgetStorage.saveBudgets(list);
-                                }
-
-                                if (mounted) Navigator.pop(context, true);
-                              } finally {
-                                if (mounted) setState(() => _saving = false);
-                              }
-                            },
-                            child: _saving
-                                ? const SizedBox(height: 16, width: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                                : const Text('Save'),
-                          ),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: isSel ? Theme.of(context).primaryColor : (isDark ? Colors.grey[800] : Colors.grey[200]),
+                          borderRadius: BorderRadius.circular(20),
                         ),
-                      ],
+                        child: Text(cat, style: TextStyle(color: isSel ? Colors.white : (isDark ? Colors.white70 : Colors.black), fontWeight: FontWeight.w600)),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(height: 24),
+              // Amount Input
+              TextField(
+                controller: _limitCtrl,
+                keyboardType: TextInputType.number,
+                style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                decoration: InputDecoration(
+                  prefixText: '₹ ',
+                  labelText: 'Monthly Limit',
+                  filled: true,
+                  fillColor: isDark ? Colors.grey[800] : Colors.grey[100],
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
+                ),
+              ),
+              const SizedBox(height: 16),
+              // Rollover Switch
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                  color: isDark ? Colors.grey[800] : Colors.grey[100],
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.history_edu_rounded, size: 20),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Rollover Budget', style: TextStyle(fontWeight: FontWeight.w600, color: isDark ? Colors.white : Colors.black)),
+                          const Text('Unused amount adds to next month', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                        ],
+                      ),
                     ),
-                    const SizedBox(height: 8),
+                    Switch.adaptive(
+                      value: _rollover,
+                      onChanged: (v) => setState(() => _rollover = v),
+                      activeColor: Theme.of(context).primaryColor,
+                    ),
                   ],
+                ),
+              ),
+              const SizedBox(height: 32),
+              SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: ElevatedButton(
+                  onPressed: () {
+                    final limit = double.tryParse(_limitCtrl.text);
+                    if (limit != null && limit > 0) {
+                      widget.onSave(Budget(
+                        id: widget.budget?.id ?? DateTime.now().millisecondsSinceEpoch.toString(),
+                        category: _category,
+                        limit: limit,
+                        rollover: _rollover,
+                      ));
+                      Navigator.pop(context);
+                    }
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Theme.of(context).primaryColor,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    elevation: 0,
+                  ),
+                  child: const Text('Save Budget', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: Colors.white)),
                 ),
               ),
             ],

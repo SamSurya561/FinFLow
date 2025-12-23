@@ -1,234 +1,207 @@
-// lib/features/transactions/add_expense_screen.dart
 import 'package:flutter/material.dart';
-import '../../core/storage/local_storage.dart';
-import 'models/expense_model.dart';
+import 'package:flutter/services.dart';
+import 'package:intl/intl.dart';
+import 'package:uuid/uuid.dart';
 
-// NEW imports for profile updates
-import '../../core/storage/profile_storage.dart';
-import '../budgets/storage/budget_storage.dart';
+import '../../core/models/transaction_model.dart';
+import '../../core/models/account_model.dart';
+import '../../core/services/firestore_service.dart';
 
 class AddExpenseScreen extends StatefulWidget {
-  // optional expense => if provided, screen works in EDIT mode
-  final Expense? expense;
-  const AddExpenseScreen({Key? key, this.expense}) : super(key: key);
+  final TransactionModel? transaction;
+  final String? initialCategory; // <--- ADD THIS PARAMETER
+
+  const AddExpenseScreen({super.key, this.transaction, this.initialCategory});
 
   @override
   State<AddExpenseScreen> createState() => _AddExpenseScreenState();
 }
 
 class _AddExpenseScreenState extends State<AddExpenseScreen> {
-  final _formKey = GlobalKey<FormState>();
-  late TextEditingController _amountController;
-  late TextEditingController _noteController;
-  String _category = 'Food';
-  late DateTime _date;
+  final _amountCtrl = TextEditingController();
+  final _noteCtrl = TextEditingController();
 
-  bool get isEdit => widget.expense != null;
+  String _selectedCategory = 'Food';
+  DateTime _selectedDate = DateTime.now();
+  TxnType _type = TxnType.expense;
+
+  String _selectedAccountId = '';
+  List<AccountModel> _accounts = [];
+  bool _isLoading = false;
+
+  final List<String> _expenseCategories = ['Food', 'Travel', 'Shopping', 'Bills', 'Entertainment', 'Health', 'Others'];
+  final List<String> _incomeCategories = ['Salary', 'Freelance', 'Investment', 'Gift', 'Rental', 'Others'];
 
   @override
   void initState() {
     super.initState();
-    if (isEdit) {
-      final e = widget.expense!;
-      _amountController = TextEditingController(text: e.amount.toString());
-      _noteController = TextEditingController(text: e.note);
-      _category = e.category;
-      _date = e.date;
-    } else {
-      _amountController = TextEditingController();
-      _noteController = TextEditingController();
-      _date = DateTime.now();
+
+    // 1. Handle Initial Category (if passed)
+    if (widget.initialCategory != null) {
+      _selectedCategory = widget.initialCategory!;
     }
+
+    // 2. Handle Edit Mode (Overrides initial category if editing)
+    if (widget.transaction != null) {
+      _initEditMode();
+    }
+
+    _loadAccounts();
   }
 
-  @override
-  void dispose() {
-    // Correct disposal of controllers
-    _amountController.dispose();
-    _noteController.dispose();
-    super.dispose();
+  void _initEditMode() {
+    _amountCtrl.text = widget.transaction!.amount.toStringAsFixed(0);
+    _noteCtrl.text = widget.transaction!.note;
+    _selectedCategory = widget.transaction!.category;
+    _selectedDate = widget.transaction!.date;
+    _type = widget.transaction!.type;
+    _selectedAccountId = widget.transaction!.accountId;
   }
 
-  Future<void> _save() async {
-    if (!_formKey.currentState!.validate()) return;
-    final parsed = double.parse(_amountController.text.trim());
-    final note = _noteController.text.trim();
-
-    if (isEdit) {
-      // update existing: read full list, find by id and replace, then save full list
-      final list = await LocalStorage.getExpenses();
-      final idx = list.indexWhere((it) => it.id == widget.expense!.id);
-      if (idx != -1) {
-        list[idx] = Expense(
-          id: widget.expense!.id,
-          amount: parsed,
-          category: _category,
-          note: note,
-          date: _date,
-        );
-        await LocalStorage.saveExpenses(list);
-
-        // === NEW: update profile summary after saving full list ===
-        try {
-          final budgets = await BudgetStorage.getBudgets();
-          final expenses = await LocalStorage.getExpenses();
-          final now = DateTime.now();
-          final spent = expenses
-              .where((x) => x.date.year == now.year && x.date.month == now.month)
-              .fold<double>(0.0, (p, c) => p + c.amount);
-          final totalBudget = budgets.fold<double>(0.0, (p, b) => p + (b.limit ?? 0.0));
-          final safe = (totalBudget - spent) < 0 ? 0.0 : (totalBudget - spent);
-          await Profile.updateBudgetSummary(
-            budgetsCount: budgets.length,
-            spentThisMonth: spent,
-            safeToSpendEstimate: safe,
-          );
-        } catch (_) {}
-        Navigator.pop(context, true); // saved
-        return;
+  void _loadAccounts() {
+    FirestoreService().getAccountsStream().listen((accs) async {
+      if (accs.isEmpty) {
+        final defaultAcc = AccountModel(id: const Uuid().v4(), name: 'Cash', type: 'Cash', balance: 0);
+        await FirestoreService().createAccount(defaultAcc);
       } else {
-        // fallback: append as new (shouldn't happen)
-        final newExpense = Expense(
-          id: DateTime.now().millisecondsSinceEpoch.toString(),
-          amount: parsed,
-          category: _category,
-          note: note,
-          date: _date,
-        );
-        await LocalStorage.saveExpense(newExpense);
-
-        // === NEW: update profile summary after saving a new expense (fallback) ===
-        try {
-          final budgets = await BudgetStorage.getBudgets();
-          final expenses = await LocalStorage.getExpenses();
-          final now = DateTime.now();
-          final spent = expenses
-              .where((x) => x.date.year == now.year && x.date.month == now.month)
-              .fold<double>(0.0, (p, c) => p + c.amount);
-          final totalBudget = budgets.fold<double>(0.0, (p, b) => p + (b.limit ?? 0.0));
-          final safe = (totalBudget - spent) < 0 ? 0.0 : (totalBudget - spent);
-          await Profile.updateBudgetSummary(
-            budgetsCount: budgets.length,
-            spentThisMonth: spent,
-            safeToSpendEstimate: safe,
-          );
-        } catch (_) {}
-
-        Navigator.pop(context, true);
-        return;
+        if (mounted) {
+          setState(() {
+            _accounts = accs;
+            if (_selectedAccountId.isEmpty && widget.transaction == null) {
+              _selectedAccountId = accs.first.id;
+            }
+          });
+        }
       }
-    } else {
-      // create new and append
-      final newExpense = Expense(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        amount: parsed,
-        category: _category,
-        note: note,
-        date: _date,
-      );
-      await LocalStorage.saveExpense(newExpense);
-
-      // === NEW: update profile summary after creating new expense ===
-      try {
-        final budgets = await BudgetStorage.getBudgets();
-        final expenses = await LocalStorage.getExpenses();
-        final now = DateTime.now();
-        final spent = expenses
-            .where((x) => x.date.year == now.year && x.date.month == now.month)
-            .fold<double>(0.0, (p, c) => p + c.amount);
-        final totalBudget = budgets.fold<double>(0.0, (p, b) => p + (b.limit ?? 0.0));
-        final safe = (totalBudget - spent) < 0 ? 0.0 : (totalBudget - spent);
-        await Profile.updateBudgetSummary(
-          budgetsCount: budgets.length,
-          spentThisMonth: spent,
-          safeToSpendEstimate: safe,
-        );
-      } catch (_) {}
-
-      Navigator.pop(context, true);
-      return;
-    }
-  }
-
-  Future<void> _pickDateTime() async {
-    final d = await showDatePicker(
-      context: context,
-      initialDate: _date,
-      firstDate: DateTime(2000),
-      lastDate: DateTime(2100),
-    );
-    if (d == null) return;
-    final t = await showTimePicker(context: context, initialTime: TimeOfDay.fromDateTime(_date));
-    if (t == null) return;
-    setState(() {
-      _date = DateTime(d.year, d.month, d.day, t.hour, t.minute);
     });
   }
 
-  String _fmt(DateTime dt) => '${dt.day}-${dt.month}-${dt.year} ${dt.hour.toString().padLeft(2,'0')}:${dt.minute.toString().padLeft(2,'0')}';
+  Future<void> _save() async {
+    if (_amountCtrl.text.isEmpty) return;
+    if (_selectedAccountId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Please select a wallet")));
+      return;
+    }
+
+    setState(() => _isLoading = true);
+    HapticFeedback.mediumImpact();
+
+    final txn = TransactionModel(
+      id: widget.transaction?.id ?? const Uuid().v4(),
+      amount: double.parse(_amountCtrl.text),
+      category: _selectedCategory,
+      date: _selectedDate,
+      note: _noteCtrl.text,
+      type: _type,
+      accountId: _selectedAccountId,
+    );
+
+    try {
+      if (widget.transaction == null) {
+        await FirestoreService().addTransaction(txn);
+      } else {
+        await FirestoreService().updateTransaction(txn);
+      }
+      if (mounted) Navigator.pop(context);
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error: $e")));
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bgColor = isDark ? const Color(0xFF000000) : const Color(0xFFF2F2F7);
+    final cardColor = isDark ? const Color(0xFF1C1C1E) : Colors.white;
+    final primaryColor = _type == TxnType.income ? const Color(0xFF30D158) : const Color(0xFFFF453A);
+
     return Scaffold(
-      appBar: isEdit ? AppBar(title: const Text('Edit expense')) : AppBar(title: const Text('Add expense')),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            Form(
-              key: _formKey,
-              child: Column(
-                children: [
-                  TextFormField(
-                    controller: _amountController,
-                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                    decoration: const InputDecoration(labelText: 'Amount'),
-                    validator: (v) {
-                      if (v == null || v.trim().isEmpty) return 'Enter amount';
-                      final n = double.tryParse(v);
-                      if (n == null) return 'Invalid number';
-                      if (n <= 0) return 'Amount must be > 0';
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: 12),
-                  DropdownButtonFormField<String>(
-                    value: _category,
-                    decoration: const InputDecoration(labelText: 'Category'),
-                    items: <String>['Food', 'Travel', 'Shopping', 'Bills', 'General or Others'].map((c) {
-                      return DropdownMenuItem(value: c, child: Text(c));
-                    }).toList(),
-                    onChanged: (v) {
-                      if (v == null) return;
-                      setState(() => _category = v);
-                    },
-                  ),
-                  const SizedBox(height: 12),
-                  TextFormField(
-                    controller: _noteController,
-                    decoration: const InputDecoration(labelText: 'Note (optional)'),
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(child: Text('Date: ${_fmt(_date)}')),
-                      TextButton(onPressed: _pickDateTime, child: const Text('Change')),
-                    ],
-                  ),
-                  const SizedBox(height: 20),
-                  Row(
-                    children: [
-                      Expanded(child: OutlinedButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel'))),
-                      const SizedBox(width: 12),
-                      Expanded(child: ElevatedButton(onPressed: _save, child: Text(isEdit ? 'Save' : 'Add'))),
-                    ],
-                  ),
-                ],
+      backgroundColor: bgColor,
+      appBar: AppBar(
+        backgroundColor: bgColor,
+        elevation: 0,
+        leading: IconButton(icon: Icon(Icons.close, color: isDark ? Colors.white : Colors.black), onPressed: () => Navigator.pop(context)),
+        title: Text(widget.transaction == null ? 'Add Transaction' : 'Edit Transaction', style: TextStyle(color: isDark ? Colors.white : Colors.black, fontWeight: FontWeight.bold)),
+        actions: [
+          TextButton(onPressed: _save, child: Text("Save", style: TextStyle(color: primaryColor, fontWeight: FontWeight.bold, fontSize: 16)))
+        ],
+      ),
+      body: _isLoading ? const Center(child: CircularProgressIndicator()) : ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          Container(
+            padding: const EdgeInsets.all(4),
+            decoration: BoxDecoration(color: cardColor, borderRadius: BorderRadius.circular(12)),
+            child: Row(children: [_buildTypeBtn("Expense", TxnType.expense, isDark), _buildTypeBtn("Income", TxnType.income, isDark)]),
+          ),
+          const SizedBox(height: 24),
+          Text("AMOUNT", style: TextStyle(color: Colors.grey[500], fontSize: 12, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+            decoration: BoxDecoration(color: cardColor, borderRadius: BorderRadius.circular(16)),
+            child: TextField(
+              controller: _amountCtrl,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              style: TextStyle(fontSize: 32, fontWeight: FontWeight.w900, color: isDark ? Colors.white : Colors.black),
+              decoration: InputDecoration(prefixText: '₹ ', prefixStyle: TextStyle(fontSize: 32, fontWeight: FontWeight.w900, color: primaryColor), border: InputBorder.none, hintText: '0'),
+            ),
+          ),
+          const SizedBox(height: 24),
+          Text("CATEGORY", style: TextStyle(color: Colors.grey[500], fontSize: 12, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          Wrap(spacing: 10, runSpacing: 10, children: (_type == TxnType.income ? _incomeCategories : _expenseCategories).map((cat) {
+            final isSelected = _selectedCategory == cat;
+            return ChoiceChip(
+              label: Text(cat),
+              selected: isSelected,
+              selectedColor: primaryColor.withOpacity(0.2),
+              labelStyle: TextStyle(color: isSelected ? primaryColor : (isDark ? Colors.white : Colors.black), fontWeight: isSelected ? FontWeight.bold : FontWeight.normal),
+              backgroundColor: cardColor,
+              onSelected: (_) => setState(() => _selectedCategory = cat),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: isSelected ? primaryColor : Colors.transparent)),
+            );
+          }).toList()),
+          const SizedBox(height: 24),
+          Text("DETAILS", style: TextStyle(color: Colors.grey[500], fontSize: 12, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          Container(
+            decoration: BoxDecoration(color: cardColor, borderRadius: BorderRadius.circular(16)),
+            child: Column(children: [
+              ListTile(
+                leading: Icon(Icons.account_balance_wallet, color: primaryColor),
+                title: const Text("Wallet"),
+                trailing: DropdownButtonHideUnderline(child: DropdownButton<String>(
+                  value: _selectedAccountId.isNotEmpty ? _selectedAccountId : null,
+                  dropdownColor: cardColor,
+                  items: _accounts.map((acc) => DropdownMenuItem(value: acc.id, child: Text(acc.name, style: TextStyle(color: isDark ? Colors.white : Colors.black)))).toList(),
+                  onChanged: (val) => setState(() => _selectedAccountId = val!),
+                )),
               ),
-            )
-          ],
-        ),
+              Divider(color: Colors.grey.withOpacity(0.1), height: 1),
+              ListTile(
+                leading: Icon(Icons.calendar_today, color: primaryColor),
+                title: const Text("Date"),
+                trailing: Text(DateFormat('MMM d').format(_selectedDate), style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black)),
+                onTap: () async {
+                  final picked = await showDatePicker(context: context, initialDate: _selectedDate, firstDate: DateTime(2020), lastDate: DateTime.now(), builder: (context, child) => Theme(data: isDark ? ThemeData.dark() : ThemeData.light(), child: child!));
+                  if (picked != null) setState(() => _selectedDate = picked);
+                },
+              ),
+              Divider(color: Colors.grey.withOpacity(0.1), height: 1),
+              Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: TextField(controller: _noteCtrl, decoration: const InputDecoration(icon: Icon(Icons.notes, color: Colors.grey), hintText: "Add a note", border: InputBorder.none))),
+            ]),
+          ),
+        ],
       ),
     );
+  }
+
+  Widget _buildTypeBtn(String label, TxnType type, bool isDark) {
+    final isSelected = _type == type;
+    final color = type == TxnType.income ? const Color(0xFF30D158) : const Color(0xFFFF453A);
+    return Expanded(child: GestureDetector(onTap: () => setState(() => _type = type), child: Container(padding: const EdgeInsets.symmetric(vertical: 12), decoration: BoxDecoration(color: isSelected ? color : Colors.transparent, borderRadius: BorderRadius.circular(10)), alignment: Alignment.center, child: Text(label, style: TextStyle(color: isSelected ? Colors.white : Colors.grey, fontWeight: FontWeight.bold)))));
   }
 }
